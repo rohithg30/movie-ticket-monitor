@@ -1,0 +1,37 @@
+movie:
+  title: "Jana Nayagan"
+  city: "chennai"
+
+target_theatres:
+  # Priority order: first match on a given date wins.
+  # Lower-priority theatres are NOT emailed for the same date once a
+  # higher-priority one has been notified.
+  - name_contains: "PVR"
+    subname_contains: "Grand Mall"
+  - name_contains: "INOX"
+    subname_contains: "Phoenix"
+  - name_contains: "PVR"
+    subname_contains: "Aerohub"
+
+showtime:
+  # First show of the day, must start before this time (24h format).
+  time_before: "12:00"
+
+tickets:
+  count: 5
+  seats_together: true
+  row_priority: ["A", "B", "C", "D"]
+
+date_range:
+  start: "2026-07-17"
+  end:   "2026-07-27"
+
+notify:
+  email: "rohithg302002@gmail.com"
+  from:  "onboarding@resend.dev"
+
+polling:
+  # Each GitHub Actions run polls this many times, sleeping between checks.
+  # 4 x 60s inside a 5-min cron = effective ~1-minute check interval.
+  checks_per_run: 4
+  sleep_seconds: 60
