@@ -1,8 +1,9 @@
-"""Monitor BookMyShow for Jana Nayagan tickets at target Chennai theatres.
+"""Monitor BookMyShow for tickets at target theatres in a target city.
 
-Sends an email (via Resend) the moment a target theatre opens the morning
-first-show for the target date range. Notification is one-shot per unique
-(date, theatre, showtime) so you don't get spammed once tickets open.
+Sends an email (via Resend) the moment a target theatre opens the
+morning first-show for the target date range. Notification is one-shot
+per unique (date, theatre, showtime) so you don't get spammed once
+tickets open.
 """
 import html
 import json
@@ -20,6 +21,8 @@ ROOT = Path(__file__).parent
 CFG = yaml.safe_load((ROOT / "config.yml").read_text())
 STATE_FILE = ROOT / "state.json"
 
+DRY_RUN = "--dry-run" in sys.argv
+
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -35,6 +38,18 @@ BASE_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
+# BookMyShow uses short region codes in some URLs.
+CITY_SHORT_CODES = {
+    "chennai": "chen",
+    "mumbai": "mumbai",
+    "bengaluru": "bang",
+    "bangalore": "bang",
+    "hyderabad": "hyd",
+    "delhi": "ncr",
+    "kolkata": "kolk",
+    "pune": "pune",
+}
+
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -46,18 +61,46 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+    if DRY_RUN:
+        return
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
+def extract_initial_state(html_text: str):
+    """Extract `window.__INITIAL_STATE__ = { ... };` blob with brace matching."""
+    m = re.search(r"window\.__INITIAL_STATE__\s*=\s*", html_text)
+    if not m:
+        return None
+    start = m.end()
+    depth = 0
+    for i in range(start, len(html_text)):
+        c = html_text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(html_text[start:i + 1])
+                except Exception:
+                    return None
+    return None
+
+
 def fetch_movie_code(title: str, city: str):
-    """Search BookMyShow city listings for `title`. Return (slug, event_code)."""
+    """Find the BMS slug + event code for `title` in `city`.
+
+    Returns (slug, event_code) or (None, None) if not yet listed.
+    """
     urls = [
         f"https://in.bookmyshow.com/explore/movies-{city}",
         f"https://in.bookmyshow.com/explore/upcoming-movies-{city}",
     ]
     title_norm = re.sub(r"[^a-z0-9]", "", title.lower())
+    # BookMyShow movie links use the pattern /{city}/movies/{slug}/{code}
+    # (e.g. /chennai/movies/the-odyssey/ET00452034)
     pattern = re.compile(
-        rf"/movies/{re.escape(city)}/([a-z0-9-]+)/(ET\d+)", re.I
+        rf"/{re.escape(city)}/movies/([a-z0-9-]+)/(ET\d+)", re.I
     )
     for url in urls:
         try:
@@ -76,59 +119,71 @@ def fetch_movie_code(title: str, city: str):
     return None, None
 
 
-def fetch_showtimes(slug: str, code: str, city: str, on_date: date):
-    """Return (page_url, list of show dicts)."""
+def buytickets_url(slug: str, code: str, city: str, on_date: date) -> str:
     ymd = on_date.strftime("%Y%m%d")
-    url = (
-        f"https://in.bookmyshow.com/movies/{city}/{slug}/buytickets/{code}/{ymd}"
+    city_code = CITY_SHORT_CODES.get(city.lower(), city[:4].lower())
+    return (
+        f"https://in.bookmyshow.com/buytickets/"
+        f"{slug}-{city}/movie-{city_code}-{code}-MT/{ymd}"
     )
+
+
+def fetch_showtimes(slug: str, code: str, city: str, on_date: date):
+    """Return (page_url, list of show dicts) for the given date."""
+    ymd = on_date.strftime("%Y%m%d")
+    url = buytickets_url(slug, code, city, on_date)
     try:
-        r = requests.get(url, headers=BASE_HEADERS, timeout=30)
+        r = requests.get(url, headers=BASE_HEADERS, timeout=30,
+                         allow_redirects=True)
     except requests.RequestException as e:
         print(f"[warn] fetch {url}: {e}", file=sys.stderr)
         return url, []
     if r.status_code != 200:
         return url, []
-    m = re.search(
-        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-        r.text, re.S,
-    )
-    if not m:
+    state = extract_initial_state(r.text)
+    if not state:
         return url, []
     try:
-        data = json.loads(m.group(1))
-    except Exception:
+        date_data = state["showtimesByEvent"]["showDates"][ymd]
+        widgets = date_data["dynamic"]["data"]["showtimeWidgets"]
+    except (KeyError, TypeError):
         return url, []
 
     shows = []
-    stack = [data]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, dict):
-            venue = (
-                node.get("venueName")
-                or node.get("VenueName")
-                or node.get("VenueTitle")
-                or node.get("displayName")
-            )
-            showtime = (
-                node.get("showTime")
-                or node.get("ShowTime")
-                or node.get("startTime")
-                or node.get("EventTime")
-            )
-            if venue and showtime:
+    for w in widgets:
+        if not isinstance(w, dict) or w.get("type") != "groupList":
+            continue
+        try:
+            venue_blocks = w["data"][0]["data"]
+        except (KeyError, IndexError, TypeError):
+            continue
+        for block in venue_blocks:
+            if not isinstance(block, dict):
+                continue
+            add = block.get("additionalData") or {}
+            venue_name = add.get("venueName")
+            venue_code = add.get("venueCode")
+            if not venue_name:
+                continue
+            for s in (block.get("showtimes") or []):
+                sadd = s.get("additionalData") or {}
+                cta = s.get("cta") or {}
+                cta_analytics = cta.get("analytics") or {}
+                meta = cta_analytics.get("metadata") or ""
+                seat_hint = ""
+                if "fast_filling" in meta:
+                    seat_hint = "fast filling"
+                elif "sold_out" in meta:
+                    seat_hint = "sold out"
                 shows.append({
-                    "theatre": str(venue),
-                    "showtime": str(showtime),
-                    "seat_hint": str(
-                        node.get("availability")
-                        or node.get("Availability") or ""
-                    ),
+                    "theatre": venue_name,
+                    "venue_code": venue_code,
+                    "showtime": s.get("title") or sadd.get("showTime") or "",
+                    "showtime_code": sadd.get("showTimeCode") or "",
+                    "session_id": sadd.get("sessionId") or "",
+                    "avail_status": sadd.get("availStatus") or "",
+                    "seat_hint": seat_hint,
                 })
-            stack.extend(node.values())
-        elif isinstance(node, list):
-            stack.extend(node)
     return url, shows
 
 
@@ -140,9 +195,13 @@ def matches_theatre(theatre: str, target: dict) -> bool:
     )
 
 
-def parse_hhmm(s: str):
-    """Parse a show time string. Return (hour, minute) or None."""
-    s = s.strip()
+def parse_hhmm(show: dict):
+    """Return (hour, minute) preferring showTimeCode over display string."""
+    code = (show.get("showtime_code") or "").strip()
+    if code.isdigit():
+        code = code.zfill(4)
+        return int(code[:2]), int(code[2:])
+    s = (show.get("showtime") or "").strip()
     m = re.match(r"(\d{1,2}):(\d{2})\s*(AM|PM)?", s, re.I)
     if not m:
         return None
@@ -157,6 +216,10 @@ def parse_hhmm(s: str):
 
 
 def send_email(subject: str, html_body: str) -> bool:
+    if DRY_RUN:
+        print(f"[dry-run] would send email: {subject}")
+        print(f"[dry-run] to: {CFG['notify']['email']}")
+        return True
     api_key = os.environ.get("RESEND_API_KEY")
     if not api_key:
         print("[error] RESEND_API_KEY not set", file=sys.stderr)
@@ -200,7 +263,7 @@ def build_email_html(title, d, target, show, url):
     return f"""
     <h2 style="margin:0 0 8px">{html.escape(title)} — tickets open</h2>
     <p style="font-size:15px;line-height:1.5">
-      <b>Theatre:</b> {html.escape(target['name_contains'])} {html.escape(target['subname_contains'])}<br>
+      <b>Theatre:</b> {html.escape(show['theatre'])}<br>
       <b>Date:</b> {d.strftime('%a, %d %b %Y')}<br>
       <b>Show:</b> {html.escape(show['showtime'])} (morning first show)<br>
       <b>Tickets:</b> {CFG['tickets']['count']} together<br>
@@ -215,10 +278,11 @@ def build_email_html(title, d, target, show, url):
       </a>
     </p>
     <p style="color:#666;font-size:12px">
-      Tap the button on your phone. You land on the showtimes page for that
-      date. Tap this theatre and the {html.escape(show['showtime'])} show.
-      Pick 5 seats in row {html.escape(CFG['tickets']['row_priority'][0])}
-      first (fall back to {' / '.join(CFG['tickets']['row_priority'][1:])}).
+      Tap the button on your phone. You land on the showtimes page for
+      {d.strftime('%a %d %b')}. Tap the {html.escape(show['showtime'])} show
+      at this theatre. Pick 5 seats in row
+      {html.escape(CFG['tickets']['row_priority'][0])} first (fall back to
+      {' / '.join(CFG['tickets']['row_priority'][1:])}).
       Pay with UPI or OTP. Seats stay locked for ~8 minutes.
     </p>
     """
@@ -241,13 +305,15 @@ def check_once(state: dict) -> bool:
         url, shows = fetch_showtimes(slug, code, city, d)
         if not shows:
             continue
+        print(f"[data] {d.isoformat()}: {len(shows)} shows across "
+              f"{len({s['theatre'] for s in shows})} venues")
         for target in CFG["target_theatres"]:
             matched = [s for s in shows if matches_theatre(s["theatre"], target)]
             if not matched:
                 continue
             morning = []
             for s in matched:
-                hm = parse_hhmm(s["showtime"])
+                hm = parse_hhmm(s)
                 if hm and (hm[0], hm[1]) < (cutoff_h, cutoff_m):
                     morning.append((hm, s))
             if not morning:
@@ -261,7 +327,6 @@ def check_once(state: dict) -> bool:
             )
             if key in state["notified"]:
                 break
-            state["notified"].append(key)
             subj = (
                 f"[TICKET ALERT] {movie['title']} - "
                 f"{target['name_contains']} {target['subname_contains']} - "
@@ -269,6 +334,7 @@ def check_once(state: dict) -> bool:
             )
             body = build_email_html(movie["title"], d, target, first_show, url)
             if send_email(subj, body):
+                state["notified"].append(key)
                 sent_any = True
             break
     return sent_any
@@ -276,8 +342,11 @@ def check_once(state: dict) -> bool:
 
 def main():
     state = load_state()
-    n_runs = CFG.get("polling", {}).get("checks_per_run", 1)
-    sleep_s = CFG.get("polling", {}).get("sleep_seconds", 60)
+    if DRY_RUN:
+        n_runs, sleep_s = 1, 0
+    else:
+        n_runs = CFG.get("polling", {}).get("checks_per_run", 1)
+        sleep_s = CFG.get("polling", {}).get("sleep_seconds", 60)
     for i in range(n_runs):
         try:
             check_once(state)
