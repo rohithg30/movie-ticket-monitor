@@ -1,13 +1,1 @@
-{
-  "discovery": {
-    "at": 1784301523,
-    "city": "chennai",
-    "code": "ET00452034",
-    "slug": "the-odyssey",
-    "title": "The Odyssey"
-  },
-  "notified": [
-    "2026-07-18|PVR|Grand Mall|09:30 AM",
-    "2026-07-19|PVR|Grand Mall|09:30 AM"
-  ]
-}
+{"notified": []}
