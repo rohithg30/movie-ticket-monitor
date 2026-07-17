@@ -12,6 +12,8 @@ target_theatres:
     subname_contains: "Phoenix"
   - name_contains: "PVR"
     subname_contains: "Aerohub"
+  - name_contains: "Cinepolis"
+    subname_contains: "BSR"
 
 showtime:
   # First show of the day, must start before this time (24h format).
