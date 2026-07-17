@@ -63,7 +63,9 @@ def load_state() -> dict:
 def save_state(state: dict) -> None:
     if DRY_RUN:
         return
-    STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
+    STATE_FILE.write_text(
+        json.dumps(state, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def extract_initial_state(html_text: str):

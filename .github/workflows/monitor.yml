@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -28,11 +30,29 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
         run: python monitor.py
       - name: Commit state
+        continue-on-error: true
         run: |
-          if [[ -n "$(git status --porcelain state.json)" ]]; then
-            git config user.name  "movie-monitor-bot"
-            git config user.email "bot@users.noreply.github.com"
-            git add state.json
-            git commit -m "chore: state $(date -u +%FT%TZ)"
-            git push
+          if [[ -z "$(git status --porcelain state.json)" ]]; then
+            echo "state.json unchanged; nothing to commit."
+            exit 0
           fi
+          git config user.name  "movie-monitor-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state.json
+          git commit -m "chore: state $(date -u +%FT%TZ)"
+          # Rebase onto latest remote in case main moved forward during the run.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if git rebase origin/main; then
+              if git push origin HEAD:main; then
+                echo "state pushed (attempt $attempt)"
+                exit 0
+              fi
+            else
+              git rebase --abort || true
+            fi
+            echo "push retry $attempt failed, sleeping 5s"
+            sleep 5
+          done
+          echo "warn: could not push state.json after 3 attempts; will retry next run"
+          exit 0
