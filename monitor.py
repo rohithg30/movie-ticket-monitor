@@ -150,14 +150,6 @@ def buytickets_url(slug: str, code: str, city: str, on_date: date) -> str:
     )
 
 
-def seat_layout_url(venue_code: str, event_code: str, session_id: str) -> str:
-    """Direct deep-link to the seat-selection page for a specific showtime."""
-    return (
-        f"https://in.bookmyshow.com/booktickets/"
-        f"{venue_code}/{event_code}/{session_id}"
-    )
-
-
 def fetch_showtimes(slug: str, code: str, city: str, on_date: date):
     """Return (page_url, list of show dicts) for the given date."""
     ymd = on_date.strftime("%Y%m%d")
@@ -287,41 +279,38 @@ def date_range(start_s: str, end_s: str):
         d += timedelta(days=1)
 
 
-def build_email_html(title, d, target, show, seat_url=None, date_url=None):
+def build_email_html(title, d, target, show, link_url):
     rows_pref = " > ".join(CFG["tickets"]["row_priority"])
-    primary_url = seat_url or date_url or "#"
-    fallback_link = ""
-    if seat_url and date_url:
-        fallback_link = f"""
-    <p style="font-size:12px;color:#888;margin:8px 0">
-      Backup link (all shows for this date):
-      <a href="{html.escape(date_url)}" style="color:#888">{html.escape(date_url)}</a>
-    </p>"""
     return f"""
     <h2 style="margin:0 0 8px">{html.escape(title)} — tickets open</h2>
+    <div style="background:#fff8e1;border-left:4px solid #f4b400;
+                padding:12px 14px;margin:10px 0;font-size:15px;line-height:1.5">
+      <b>What to do:</b><br>
+      1. Tap the red button below<br>
+      2. On the page that loads, scroll to <b>{html.escape(show['theatre'])}</b><br>
+      3. Tap the <b>{html.escape(show['showtime'])}</b> time button<br>
+      4. Pick <b>{CFG['tickets']['count']} seats in row {html.escape(CFG['tickets']['row_priority'][0])}</b>
+         (fall back to {' / '.join(CFG['tickets']['row_priority'][1:])} — back rows)<br>
+      5. Pay with UPI/OTP within ~8 minutes
+    </div>
     <p style="font-size:15px;line-height:1.5">
+      <b>Movie:</b> {html.escape(title)}<br>
       <b>Theatre:</b> {html.escape(show['theatre'])}<br>
       <b>Date:</b> {d.strftime('%a, %d %b %Y')}<br>
       <b>Show:</b> {html.escape(show['showtime'])} (morning first show)<br>
-      <b>Tickets:</b> {CFG['tickets']['count']} together<br>
-      <b>Row preference (back rows):</b> {html.escape(rows_pref)}<br>
-      <b>Availability hint:</b> {html.escape(show.get('seat_hint') or 'listed')}
+      <b>Availability:</b> {html.escape(show.get('seat_hint') or 'listed')}<br>
+      <b>Row priority:</b> {html.escape(rows_pref)}
     </p>
     <p style="margin:20px 0">
-      <a href="{html.escape(primary_url)}"
+      <a href="{html.escape(link_url)}"
          style="display:inline-block;padding:14px 22px;background:#e50914;color:#fff;
                 text-decoration:none;font-weight:600;border-radius:6px;font-size:16px">
-         Open seat selection — pick 5 seats now
+         Open BookMyShow — {html.escape(d.strftime('%a %d %b'))}
       </a>
     </p>
-    <p style="color:#666;font-size:12px">
-      This link opens the seat-selection page for
-      <b>{html.escape(show['theatre'])}</b> — {html.escape(show['showtime'])} on
-      {d.strftime('%a %d %b')} directly. Pick 5 seats in row
-      <b>{html.escape(CFG['tickets']['row_priority'][0])}</b> first
-      (fall back to {' / '.join(CFG['tickets']['row_priority'][1:])}).
-      Pay with UPI or OTP. Seats stay locked for ~8 minutes.
-    </p>{fallback_link}
+    <p style="color:#888;font-size:12px;margin-top:20px">
+      Link URL: <span style="word-break:break-all">{html.escape(link_url)}</span>
+    </p>
     """
 
 
@@ -387,14 +376,17 @@ def check_once(state: dict) -> bool:
             if key in state["notified"]:
                 break
 
-            # Build the direct seat-selection deep-link when we have both
-            # a venue_code and session_id. This drops the user straight
-            # onto the seat picker for the exact theatre + showtime.
-            seat_url = None
-            if first_show.get("venue_code") and first_show.get("session_id"):
-                seat_url = seat_layout_url(
-                    first_show["venue_code"], code, first_show["session_id"]
-                )
+            # BMS's showtime buttons on the buytickets page are pure JS
+            # (AJAX POST to their seat-layout API). There is no public
+            # bookmarkable URL that jumps straight to seat picking — every
+            # deep-link pattern we tried returns "Invalid Request!" or 404.
+            # Best we can do: link to the per-date buytickets page with
+            # a #<venueCode> fragment so BMS's client can scroll to the
+            # right venue block. Then the email tells the user exactly
+            # which theatre + time button to tap.
+            link_url = url
+            if first_show.get("venue_code"):
+                link_url = f"{url}#{first_show['venue_code']}"
 
             subj = (
                 f"[TICKET ALERT] {movie['title']} - "
@@ -402,8 +394,7 @@ def check_once(state: dict) -> bool:
                 f"{d.strftime('%a %d %b')} {first_show['showtime']}"
             )
             body = build_email_html(
-                movie["title"], d, target, first_show,
-                seat_url=seat_url, date_url=url,
+                movie["title"], d, target, first_show, link_url=link_url,
             )
             if send_email(subj, body):
                 state["notified"].append(key)
