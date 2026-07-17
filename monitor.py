@@ -346,13 +346,35 @@ def check_once(state: dict) -> bool:
     cutoff_h, cutoff_m = map(int, time_cutoff.split(":"))
     sent_any = False
 
+    # Two credit-saving optimizations:
+    #  1. Skip a date once ANY notification has been sent for it (user only
+    #     needs one alert per date to go book).
+    #  2. Sentinel mode: while `on_sale` is False, if the first date we probe
+    #     returns 0 showtimes we assume BMS hasn't opened this movie yet and
+    #     stop fetching the rest of the range this run (1 request/run cost).
+    #     The moment ANY date returns showtimes we flip to full-sweep mode
+    #     and grab every remaining unnotified date in the same run.
+    on_sale = bool(state.get("on_sale", False))
+    notified_dates = {k.split("|", 1)[0] for k in state.get("notified", [])}
+
     today = date.today()
     for d in date_range(CFG["date_range"]["start"], CFG["date_range"]["end"]):
         if d < today:
             continue
+        if d.isoformat() in notified_dates:
+            print(f"[skip] {d.isoformat()}: already notified")
+            continue
         url, shows = fetch_showtimes(slug, code, city, d)
         if not shows:
+            if not on_sale:
+                print(f"[sentinel] {d.isoformat()}: no shows yet; "
+                      f"movie not on sale — skipping remaining dates")
+                break
             continue
+        if not on_sale:
+            on_sale = True
+            state["on_sale"] = True
+            print("[flag] movie is ON SALE — sweeping all remaining dates")
         print(f"[data] {d.isoformat()}: {len(shows)} shows across "
               f"{len({s['theatre'] for s in shows})} venues")
         for target in CFG["target_theatres"]:

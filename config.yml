@@ -1,5 +1,5 @@
 movie:
-  title: "The Odyssey"
+  title: "Jana Nayagan"
   city: "chennai"
 
 target_theatres:
@@ -23,8 +23,10 @@ tickets:
   row_priority: ["A", "B", "C", "D"]
 
 date_range:
-  start: "2026-07-17"
-  end:   "2026-07-27"
+  # Jana Nayagan releases 2026-07-23. Advance booking typically opens 2-5
+  # days before release. Range covers release day + first week.
+  start: "2026-07-19"
+  end:   "2026-07-31"
 
 notify:
   email: "rohithg302002@gmail.com"
