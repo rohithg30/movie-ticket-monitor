@@ -141,11 +141,20 @@ def fetch_movie_code(title: str, city: str):
 
 
 def buytickets_url(slug: str, code: str, city: str, on_date: date) -> str:
+    """Movie's per-date showtime listing page (all theatres for that day)."""
     ymd = on_date.strftime("%Y%m%d")
     city_code = CITY_SHORT_CODES.get(city.lower(), city[:4].lower())
     return (
         f"https://in.bookmyshow.com/buytickets/"
         f"{slug}-{city}/movie-{city_code}-{code}-MT/{ymd}"
+    )
+
+
+def seat_layout_url(venue_code: str, event_code: str, session_id: str) -> str:
+    """Direct deep-link to the seat-selection page for a specific showtime."""
+    return (
+        f"https://in.bookmyshow.com/booktickets/"
+        f"{venue_code}/{event_code}/{session_id}"
     )
 
 
@@ -278,8 +287,16 @@ def date_range(start_s: str, end_s: str):
         d += timedelta(days=1)
 
 
-def build_email_html(title, d, target, show, url):
+def build_email_html(title, d, target, show, seat_url=None, date_url=None):
     rows_pref = " > ".join(CFG["tickets"]["row_priority"])
+    primary_url = seat_url or date_url or "#"
+    fallback_link = ""
+    if seat_url and date_url:
+        fallback_link = f"""
+    <p style="font-size:12px;color:#888;margin:8px 0">
+      Backup link (all shows for this date):
+      <a href="{html.escape(date_url)}" style="color:#888">{html.escape(date_url)}</a>
+    </p>"""
     return f"""
     <h2 style="margin:0 0 8px">{html.escape(title)} — tickets open</h2>
     <p style="font-size:15px;line-height:1.5">
@@ -291,20 +308,20 @@ def build_email_html(title, d, target, show, url):
       <b>Availability hint:</b> {html.escape(show.get('seat_hint') or 'listed')}
     </p>
     <p style="margin:20px 0">
-      <a href="{html.escape(url)}"
+      <a href="{html.escape(primary_url)}"
          style="display:inline-block;padding:14px 22px;background:#e50914;color:#fff;
                 text-decoration:none;font-weight:600;border-radius:6px;font-size:16px">
-         Open BookMyShow — pick seats
+         Open seat selection — pick 5 seats now
       </a>
     </p>
     <p style="color:#666;font-size:12px">
-      Tap the button on your phone. You land on the showtimes page for
-      {d.strftime('%a %d %b')}. Tap the {html.escape(show['showtime'])} show
-      at this theatre. Pick 5 seats in row
-      {html.escape(CFG['tickets']['row_priority'][0])} first (fall back to
-      {' / '.join(CFG['tickets']['row_priority'][1:])}).
+      This link opens the seat-selection page for
+      <b>{html.escape(show['theatre'])}</b> — {html.escape(show['showtime'])} on
+      {d.strftime('%a %d %b')} directly. Pick 5 seats in row
+      <b>{html.escape(CFG['tickets']['row_priority'][0])}</b> first
+      (fall back to {' / '.join(CFG['tickets']['row_priority'][1:])}).
       Pay with UPI or OTP. Seats stay locked for ~8 minutes.
-    </p>
+    </p>{fallback_link}
     """
 
 
@@ -369,12 +386,25 @@ def check_once(state: dict) -> bool:
             )
             if key in state["notified"]:
                 break
+
+            # Build the direct seat-selection deep-link when we have both
+            # a venue_code and session_id. This drops the user straight
+            # onto the seat picker for the exact theatre + showtime.
+            seat_url = None
+            if first_show.get("venue_code") and first_show.get("session_id"):
+                seat_url = seat_layout_url(
+                    first_show["venue_code"], code, first_show["session_id"]
+                )
+
             subj = (
                 f"[TICKET ALERT] {movie['title']} - "
                 f"{target['name_contains']} {target['subname_contains']} - "
                 f"{d.strftime('%a %d %b')} {first_show['showtime']}"
             )
-            body = build_email_html(movie["title"], d, target, first_show, url)
+            body = build_email_html(
+                movie["title"], d, target, first_show,
+                seat_url=seat_url, date_url=url,
+            )
             if send_email(subj, body):
                 state["notified"].append(key)
                 sent_any = True
