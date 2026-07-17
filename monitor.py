@@ -22,6 +22,9 @@ CFG = yaml.safe_load((ROOT / "config.yml").read_text())
 STATE_FILE = ROOT / "state.json"
 
 DRY_RUN = "--dry-run" in sys.argv
+SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY", "")
+# Cache discovered movie slug+code for this long (seconds) to save credits.
+DISCOVERY_TTL_SECONDS = 6 * 3600
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 "
@@ -37,6 +40,22 @@ BASE_HEADERS = {
     "sec-ch-ua-platform": '"macOS"',
     "Upgrade-Insecure-Requests": "1",
 }
+
+
+def http_get(url: str, timeout: int = 60):
+    """GET a URL. Routes through ScraperAPI when SCRAPERAPI_KEY is set so
+    that BookMyShow's Cloudflare doesn't block GitHub Actions data-center
+    IPs. Falls back to direct fetch when running locally (residential IP)."""
+    if SCRAPERAPI_KEY:
+        from urllib.parse import urlencode
+        proxy_url = "http://api.scraperapi.com/?" + urlencode({
+            "api_key": SCRAPERAPI_KEY,
+            "url": url,
+            "country_code": "in",
+            "keep_headers": "true",
+        })
+        return requests.get(proxy_url, headers=BASE_HEADERS, timeout=timeout)
+    return requests.get(url, headers=BASE_HEADERS, timeout=timeout)
 
 # BookMyShow uses short region codes in some URLs.
 CITY_SHORT_CODES = {
@@ -106,7 +125,7 @@ def fetch_movie_code(title: str, city: str):
     )
     for url in urls:
         try:
-            r = requests.get(url, headers=BASE_HEADERS, timeout=30)
+            r = http_get(url, timeout=45)
         except requests.RequestException as e:
             print(f"[warn] fetch {url}: {e}", file=sys.stderr)
             continue
@@ -135,8 +154,7 @@ def fetch_showtimes(slug: str, code: str, city: str, on_date: date):
     ymd = on_date.strftime("%Y%m%d")
     url = buytickets_url(slug, code, city, on_date)
     try:
-        r = requests.get(url, headers=BASE_HEADERS, timeout=30,
-                         allow_redirects=True)
+        r = http_get(url, timeout=60)
     except requests.RequestException as e:
         print(f"[warn] fetch {url}: {e}", file=sys.stderr)
         return url, []
@@ -290,10 +308,29 @@ def build_email_html(title, d, target, show, url):
     """
 
 
+def get_movie_code_cached(state: dict, title: str, city: str):
+    """Return (slug, code) using state cache when fresh; otherwise re-discover."""
+    now = int(time.time())
+    cache = state.get("discovery") or {}
+    if (cache.get("title") == title and cache.get("city") == city
+            and cache.get("slug") and cache.get("code")
+            and now - int(cache.get("at", 0)) < DISCOVERY_TTL_SECONDS):
+        print(f"[cache] using cached movie code for '{title}' "
+              f"(age {now - int(cache['at'])}s)")
+        return cache["slug"], cache["code"]
+    slug, code = fetch_movie_code(title, city)
+    if slug and code:
+        state["discovery"] = {
+            "title": title, "city": city,
+            "slug": slug, "code": code, "at": now,
+        }
+    return slug, code
+
+
 def check_once(state: dict) -> bool:
     movie = CFG["movie"]
     city = movie["city"]
-    slug, code = fetch_movie_code(movie["title"], city)
+    slug, code = get_movie_code_cached(state, movie["title"], city)
     if not slug or not code:
         print(f"[info] '{movie['title']}' not yet listed in {city}.")
         return False
@@ -303,7 +340,10 @@ def check_once(state: dict) -> bool:
     cutoff_h, cutoff_m = map(int, time_cutoff.split(":"))
     sent_any = False
 
+    today = date.today()
     for d in date_range(CFG["date_range"]["start"], CFG["date_range"]["end"]):
+        if d < today:
+            continue
         url, shows = fetch_showtimes(slug, code, city, d)
         if not shows:
             continue

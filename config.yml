@@ -31,7 +31,8 @@ notify:
   from:  "onboarding@resend.dev"
 
 polling:
-  # Each GitHub Actions run polls this many times, sleeping between checks.
-  # 4 x 60s inside a 5-min cron = effective ~1-minute check interval.
-  checks_per_run: 4
-  sleep_seconds: 60
+  # Each GitHub Actions run polls this many times. Since we now go through
+  # ScraperAPI (free tier: 5000 credits/mo), we run 1 poll per cron tick
+  # to conserve credits. Cron itself fires every 15 min (see workflow).
+  checks_per_run: 1
+  sleep_seconds: 0
