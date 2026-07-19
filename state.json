@@ -1,6 +1,6 @@
 {
   "discovery": {
-    "at": 1784429342,
+    "at": 1784455650,
     "city": "chennai",
     "code": "ET00430817",
     "slug": "jana-nayagan",
@@ -9,5 +9,6 @@
   "notified": [
     "2026-07-18|PVR|Grand Mall|09:30 AM",
     "2026-07-19|PVR|Grand Mall|09:30 AM"
-  ]
+  ],
+  "on_sale": true
 }
